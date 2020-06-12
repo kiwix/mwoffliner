@@ -82,16 +82,6 @@ export function getSizeFromUrl(url: string) {
   return { mult, width };
 }
 
-export function randomString(len: number) {
-  let str = '';
-  const charSet = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < len; i += 1) {
-    const randomPoz = Math.floor(Math.random() * charSet.length);
-    str += charSet.substring(randomPoz, randomPoz + 1);
-  }
-  return str;
-}
-
 export function mkdirPromise(path: string) {
   return new Promise((resolve, reject) => {
     mkdirp(path, (err: any) => {
@@ -311,22 +301,6 @@ export function deDup<T>(_arr: T[], getter: (o: T) => any) {
   });
 }
 
-let lastCalled = 0;
-export function throttle(fn: (...args: any[]) => any, wait: number) {
-
-  return function (...args: any[]) {
-    const canCall = (Date.now() - lastCalled) >= wait;
-    if (canCall) {
-      fn(...args);
-      lastCalled = Date.now();
-    }
-  };
-}
-
-export const keepAlive = throttle(function keepAlive() {
-  logger.log(`Heartbeat - OK`);
-}, 1000 * 60 * 9);
-
 export function getRelativeFilePath(parentArticleId: string, fileBase: string, resourceNamespace: 'I' | 'A' | 'M') {
   const slashesInUrl = parentArticleId.split('/').length - 1;
   const upStr = '../'.repeat(slashesInUrl + 1);
@@ -345,7 +319,7 @@ export function isNodeModule(path: string) {
 export function objToQueryString(obj: KVS<any>): string {
   const str = [];
   for (const p in obj) {
-    if (obj.hasOwnProperty(p)) {
+    if (obj.hasOwnProperty(p) && p !== undefined && obj[p] !== undefined && obj[p] !== '') {
       str.push(encodeURIComponent(p) + '=' + encodeURIComponent(obj[p]));
     }
   }

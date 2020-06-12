@@ -88,6 +88,7 @@
     "md5": "^2.2.1",
     "mkdirp": "^0.5.1",
     "mocha": "^5.2.0",
+    "p-map": "^4.0.0",
     "parsoid": "^0.10.0",
     "promiso": "^0.5.1",
     "public-ip": "^4.0.1",
@@ -99,7 +100,7 @@
     "sharp": "^0.25.2",
     "swig-templates": "^2.0.2",
     "tslint": "^5.20.1",
-    "typescript": "^3.8.3",
+    "typescript": "^3.9.3",
     "utf8-binary-cutter": "^0.9.1",
     "yargs": "^13.2.0"
   },

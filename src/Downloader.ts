@@ -2,29 +2,29 @@ import md5 from 'md5';
 import * as path from 'path';
 import * as urlParser from 'url';
 import deepmerge from 'deepmerge';
+import type { BackoffStrategy } from 'backoff';
 import * as backoff from 'backoff';
 import * as imagemin from 'imagemin';
 import ServiceRunner from 'service-runner';
 import imageminAdvPng from 'imagemin-advpng';
-import type {BackoffStrategy} from 'backoff';
-import axios, {AxiosRequestConfig} from 'axios';
+import axios, { AxiosRequestConfig } from 'axios';
 import imageminPngquant from 'imagemin-pngquant';
 import imageminGifsicle from 'imagemin-gifsicle';
 import imageminJpegoptim from 'imagemin-jpegoptim';
 
 import {
+  DB_ERROR,
   FIND_HTTP_REGEX,
   MIME_IMAGE_REGEX,
   normalizeMwResponse,
   objToQueryString,
   readFilePromise,
+  renderArticle,
   URL_IMAGE_REGEX,
-  DB_ERROR,
-  writeFilePromise,
-  renderArticle
+  writeFilePromise
 } from './util';
 import S3 from './S3';
-import {Dump} from './Dump';
+import { Dump } from './Dump';
 import logger from './Logger';
 import MediaWiki from './MediaWiki';
 
@@ -278,9 +278,10 @@ class Downloader {
     return this.getJSON(`${this.mw.apiUrl}${query}`);
   }
 
-  public async getArticleDetailsIds(articleIds: string[], shouldGetThumbnail = false): Promise<QueryMwRet> {
+  public async getArticleDetailsIds(articleIds: string[], shouldGetThumbnail = false): Promise<KVS<ArticleDetail>> {
     let continuation: ContinueOpts;
-    let finalProcessedResp: QueryMwRet;
+    let result: QueryMwRet;
+
     while (true) {
       const queryOpts = {
         ...this.getArticleQueryOpts(shouldGetThumbnail),
@@ -301,25 +302,23 @@ class Downloader {
       if (resp.continue) {
         continuation = resp.continue;
         const relevantDetails = this.stripNonContinuedProps(processedResponse);
-
-        finalProcessedResp = finalProcessedResp === undefined ? relevantDetails :
-          deepmerge(finalProcessedResp, relevantDetails);
+        result = result === undefined ? relevantDetails : deepmerge(result, relevantDetails);
       } else {
         if (this.mw.getCategories) {
           processedResponse = await this.setArticleSubCategories(processedResponse);
         }
-        finalProcessedResp = finalProcessedResp === undefined ? processedResponse
-          : deepmerge(finalProcessedResp, processedResponse);
+        result = result === undefined ? processedResponse : deepmerge(result, processedResponse);
         break;
       }
     }
-    return finalProcessedResp;
+    return this.mwRetToArticleDetail(result);
   }
 
-  public async getArticleDetailsNS(ns: number, gapcontinue: string = ''): Promise<{ gapContinue: string, articleDetails: QueryMwRet }> {
+  public async getArticleDetailsNS(ns: number, gapContinue: string = ''): Promise<{ gapContinue: string, articleDetails: KVS<ArticleDetail> }> {
     let queryContinuation: QueryContinueOpts;
-    let finalProcessedResp: QueryMwRet;
+    let result: QueryMwRet;
     let gCont: string = null;
+
     while (true) {
       const queryOpts: KVS<any> = {
         ...this.getArticleQueryOpts(),
@@ -333,22 +332,14 @@ class Downloader {
         gapfilterredir: 'nonredirects',
         gaplimit: 'max',
         gapnamespace: String(ns),
-        gapcontinue,
+        gapcontinue: gapContinue
       };
 
       if (queryContinuation) {
-        if (queryContinuation.coordinates && queryContinuation.coordinates.cocontinue) {
-          queryOpts.cocontinue = queryContinuation.coordinates.cocontinue;
-        }
-        if (queryContinuation.categories && queryContinuation.categories.clcontinue) {
-          queryOpts.clcontinue = queryContinuation.categories.clcontinue;
-        }
-        if (queryContinuation.pageimages && queryContinuation.pageimages.picontinue) {
-          queryOpts.picontinue = queryContinuation.pageimages.picontinue;
-        }
-        if (queryContinuation.redirects && queryContinuation.redirects.rdcontinue) {
-          queryOpts.rdcontinue = queryContinuation.redirects.rdcontinue;
-        }
+        queryOpts.cocontinue = queryContinuation.coordinates?.cocontinue ?? queryOpts.cocontinue;
+        queryOpts.clcontinue = queryContinuation.categories?.clcontinue ?? queryOpts.clcontinue;
+        queryOpts.picontinue = queryContinuation.pageimages?.picontinue ?? queryOpts.picontinue;
+        queryOpts.rdcontinue = queryContinuation.redirects?.rdcontinue ?? queryOpts.rdcontinue;
       }
 
       const queryString = objToQueryString(queryOpts);
@@ -357,39 +348,30 @@ class Downloader {
       const resp = await this.getJSON<MwApiResponse>(reqUrl);
       Downloader.handleMWWarningsAndErrors(resp);
 
-      let processedResponse = resp.query ? normalizeMwResponse(resp.query) : {};
+      let processedResponse = normalizeMwResponse(resp.query);
 
-      try {
-        gCont = resp['query-continue'].allpages.gapcontinue;
-      } catch (err) { /* NOOP */ }
+      gCont = resp['query-continue']?.allpages?.gapcontinue;
 
-      const queryComplete = Object.keys(resp['query-continue'] || {}).filter((key) => {
-        return !(
-          key === 'allpages'
-        );
-      }).length === 0;
+      const queryComplete = Object.keys(resp['query-continue'] || {})
+        .filter((key) => key !== 'allpages')
+        .length === 0;
 
       if (!queryComplete) {
         queryContinuation = resp['query-continue'];
-
         const relevantDetails = this.stripNonContinuedProps(processedResponse);
-
-        finalProcessedResp = finalProcessedResp === undefined ? relevantDetails :
-          deepmerge(finalProcessedResp, relevantDetails);
+        result = result === undefined ? relevantDetails : deepmerge(result, relevantDetails);
       } else {
         if (this.mw.getCategories) {
           processedResponse = await this.setArticleSubCategories(processedResponse);
         }
-
-        finalProcessedResp = finalProcessedResp === undefined ? processedResponse
-          : deepmerge(finalProcessedResp, processedResponse);
+        result = result === undefined ? processedResponse : deepmerge(result, processedResponse);
         break;
       }
     }
 
     return {
-      articleDetails: finalProcessedResp,
-      gapContinue: gCont,
+      articleDetails: this.mwRetToArticleDetail(result),
+      gapContinue: gCont
     };
   }
 
@@ -620,7 +602,6 @@ class Downloader {
   }
 
   private getJSONCb<T>({url, timeout}: AxiosRequestConfig, handler: (...args: any[]) => any): void {
-    logger.info(`Getting JSON from [${url}]`);
     axios.get<T>(url, { responseType: 'json', timeout })
       .then((a) => handler(null, a.data), handler)
       .catch((err) => {
@@ -725,6 +706,26 @@ class Downloader {
     call.failAfter(this.backoffOptions.failAfter);
     call.on('backoff', this.backoffOptions.backoffHandler);
     call.start();
+  }
+
+  public mwRetToArticleDetail(obj: QueryMwRet): KVS<ArticleDetail> {
+    const result: KVS<ArticleDetail> = {};
+    for (const [key, val] of Object.entries(obj)) {
+      const rev = val.revisions && val.revisions[0];
+      const geo = val.coordinates && val.coordinates[0];
+      result[key] = {
+        title: val.title,
+        categories: val.categories,
+        subCategories: val.subCategories,
+        thumbnail: val.thumbnail ?? undefined,
+        missing: val.missing,
+        redirects: val.redirects,
+        ...(val.ns !== 0 ? {ns: val.ns} : {}),
+        ...(rev ? {revisionId: rev.revid, timestamp: rev.timestamp} : {}),
+        ...(geo ? {coordinates: `${geo.lat};${geo.lon}`} : {})
+      };
+    }
+    return result;
   }
 }
 
