@@ -1,5 +1,3 @@
-import md5 from 'md5';
-import * as path from 'path';
 import * as urlParser from 'url';
 import deepmerge from 'deepmerge';
 import * as backoff from 'backoff';
@@ -7,20 +5,18 @@ import * as imagemin from 'imagemin';
 import ServiceRunner from 'service-runner';
 import imageminAdvPng from 'imagemin-advpng';
 import type { BackoffStrategy } from 'backoff';
-import axios, { AxiosRequestConfig } from 'axios';
 import imageminPngquant from 'imagemin-pngquant';
 import imageminGifsicle from 'imagemin-gifsicle';
 import imageminJpegoptim from 'imagemin-jpegoptim';
+import axios, { AxiosRequestConfig } from 'axios';
 
 import {
   MIME_IMAGE_REGEX,
   normalizeMwResponse,
   objToQueryString,
-  readFilePromise,
   URL_IMAGE_REGEX,
   DB_ERROR,
   WEAK_ETAG_REGEX,
-  writeFilePromise,
   renderArticle,
   stripHttpFromUrl
 } from './util';
@@ -73,10 +69,10 @@ class Downloader {
   public readonly speed: number;
   public baseUrl: string;
   public baseUrlForMainPage: string;
+  public maxActiveRequests = 1;
 
   private readonly uaString: string;
   private activeRequests = 0;
-  private maxActiveRequests = 1;
   private readonly requestTimeout: number;
   private readonly noLocalParserFallback: boolean = false;
   private readonly forceLocalParser: boolean = false;
@@ -563,10 +559,10 @@ class Downloader {
     return null;
   }
 
-  private getJSONCb = <T>( url: string, handler: (...args: any[]) => any): void => {
+  public getJSONCb = <T>( url: string, handler: (...args: any[]) => any): void => {
     logger.info(`Getting JSON from [${url}]`);
-    axios.get<T>(url, this.jsonRequestOptions)
-      .then((a) => handler(null, a.data), handler)
+    axios.get(url, this.jsonRequestOptions)
+      .then((a) => handler(null, a.data))
       .catch((err) => {
         try {
           if (err.response && err.response.status === 429) {
@@ -595,7 +591,7 @@ class Downloader {
       if (this.optimisationCacheUrl && this.isImageUrl(url)) {
         this.downloadImage(url, handler);
       } else {
-        const resp = await axios(url, this.arrayBufferRequestOptions);
+        const resp = await axios.get(url, this.arrayBufferRequestOptions);
         handler(null, {
           responseHeaders: resp.headers,
           content: await this.getCompressedBody(resp),
@@ -616,7 +612,7 @@ class Downloader {
         if (imageResp?.Metadata?.etag) {
           this.arrayBufferRequestOptions.headers['If-None-Match'] = this.removeEtagWeakPrefix(imageResp.Metadata.etag);
         }
-        const resp = await axios(url, this.arrayBufferRequestOptions);
+        const resp = await axios.get(url, this.arrayBufferRequestOptions);
 
         // Most of the images after uploading once will always have 304 status, until modified.
         if (resp.status === 304) {

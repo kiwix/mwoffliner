@@ -12,7 +12,7 @@ export async function getArticlesByIds(_articleIds: string[], downloader: Downlo
 
     // using async iterator to spawn workers
     await pmap(
-        ','.repeat(downloader.speed).split(',').map((_, i) => i),
+        Array.from(Array(downloader.speed).keys()),
         async (workerId: number) => {
             while (from < numArticleIds) {
                 const articleIds = _articleIds.slice(from, from + batchSize);

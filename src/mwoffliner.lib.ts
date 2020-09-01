@@ -43,7 +43,6 @@ import {
   makeArticleListItem,
   MIN_IMAGE_THRESHOLD_ARTICLELIST_PAGE,
   mkdirPromise,
-  readFilePromise,
   sanitizeString,
   saveStaticFiles,
   writeFilePromise,
@@ -128,7 +127,7 @@ async function execute(argv: any) {
   /* Number of parallel requests */
   if (_speed && isNaN(_speed)) { throw new Error('speed is not a number, please give a number value to --speed'); }
   const cpuCount = os.cpus().length;
-  const speed = Math.max(1, Math.round(cpuCount * (_speed || 1) * 3));
+  const speed = Math.max(1, Math.round(cpuCount * (_speed || 1) * 30));
 
   /* Necessary to avoid problems with https */
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -257,7 +256,7 @@ async function execute(argv: any) {
       logger.log(`Downloading remote zim favicon from [${customZimFavicon}]`);
       content = await axios.get(customZimFavicon, downloader.arrayBufferRequestOptions)
         .then((a) => a.data)
-        .catch((err) => {
+        .catch(()=> {
           throw new Error(`Failed to download custom zim favicon from [${customZimFavicon}]`);
         });
     } else {
@@ -469,23 +468,21 @@ async function execute(argv: any) {
   async function writeArticleRedirects(downloader: Downloader, dump: Dump, zimCreator: ZimCreator) {
     await redirectsXId.iterateItems(
       downloader.speed,
-      async (redirects) => {
-        for (const [redirectId, { targetId, title }] of Object.entries(redirects)) {
-          if (redirectId !== targetId) {
-            const redirectArticle = new ZimArticle({
-              url: redirectId,
-              shouldIndex: true,
-              data: '',
-              ns: 'A',
-              mimeType: 'text/html',
-              title,
-              redirectUrl: targetId,
-            });
-            zimCreator.addArticle(redirectArticle);
-            dump.status.redirects.written += 1;
-          }
+      async (redirectId, { targetId, title }) => {
+        if (redirectId !== targetId) {
+          const redirectArticle = new ZimArticle({
+            url: redirectId,
+            shouldIndex: true,
+            data: '',
+            ns: 'A',
+            mimeType: 'text/html',
+            title,
+            redirectUrl: targetId,
+          });
+          zimCreator.addArticle(redirectArticle);
+          dump.status.redirects.written += 1;
         }
-      },
+      }
     );
   }
 

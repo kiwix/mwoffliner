@@ -1,22 +1,23 @@
 import {cpus} from 'os';
 import pmap from 'p-map';
+import fastq from 'fastq';
+import * as util from 'util';
+import deepmerge from 'deepmerge';
 import type {RedisClient} from 'redis';
 
-
-interface ScanResult {
-  cursor: string;
-  items: string[][];
-}
+let chunkSize: string = '100';
 
 
 export class RedisKvs<T> {
-  private redisClient: RedisClient;
+  private readonly redisClient: RedisClient;
+  private readonly hscanAsync: (arg0: string, arg1: string, arg2: string, arg3: string) => Promise<[string, string[]]>;
   private readonly dbName: string;
   private readonly keyMapping?: { [key: string]: string };
   private readonly invertedKeyMapping?: { [key: string]: string };
 
   constructor(redisClient: RedisClient, dbName: string, keyMapping?: { [key: string]: string }) {
     this.redisClient = redisClient;
+    this.hscanAsync = util.promisify(redisClient.hscan).bind(this.redisClient);
     this.dbName = dbName;
     this.keyMapping = keyMapping;
     if (keyMapping) {
@@ -80,8 +81,7 @@ export class RedisKvs<T> {
   public set(prop: string, val: T) {
     return new Promise((resolve, reject) => {
       const valToSet = this.mapKeysSet(val);
-      const normalisedVal = typeof valToSet !== 'string' ? JSON.stringify(valToSet) : valToSet;
-      this.redisClient.hset(this.dbName, prop, normalisedVal as string, (err, val) => {
+      this.redisClient.hset(this.dbName, prop, RedisKvs.normalize(valToSet), (err, val) => {
         if (err) {
           reject(err);
         } else {
@@ -98,13 +98,7 @@ export class RedisKvs<T> {
         resolve();
         return;
       }
-      const normalisedVal = Object.entries(val)
-        .reduce((acc: KVS<string>, [key, val]) => {
-          const newVal = this.mapKeysSet(val);
-          acc[key] = typeof newVal !== 'string' ? JSON.stringify(newVal) : newVal;
-          return acc;
-        }, {});
-      this.redisClient.hmset(this.dbName, normalisedVal, (err, val) => {
+      this.redisClient.hmset(this.dbName, this.normalizeMany(val), (err, val) => {
         if (err) {
           reject(err);
         } else {
@@ -112,6 +106,17 @@ export class RedisKvs<T> {
         }
       });
     });
+  }
+
+  public async addMany(items: KVS<T>, idsToKeep: string[] = []) {
+    if (idsToKeep.length === 0) idsToKeep = Object.keys(items);
+    const itemsToKeep = await this.getMany(idsToKeep);
+    await this.setMany(
+      deepmerge(
+        itemsToKeep,
+        items
+      ),
+    );
   }
 
   public delete(prop: string) {
@@ -162,55 +167,72 @@ export class RedisKvs<T> {
     });
   }
 
-  public async iterateItems(numWorkers: number, func: (items: KVS<T>, workerId: number) => Promise<void>) {
-    const workers = Array.from(Array(numWorkers).keys());
+  public async iterateItems(numWorkers: number, func: (key: string, value: T) => Promise<any>): Promise<string[]> {
+    const len = await this.len();
+    if (len === 0) return [];
 
-    let scanCursor = '0';
-    let depleted = false;
-    let pendingScan: Promise<ScanResult> = Promise.resolve(null);
+    const ids: any[] = [];  // for testing purposes
+    const iterator = this.scanAsync();
+    let processed = 0;
+    let warmupFactor = process.env.NODE_ENV === 'test' ? 1 : 8;
 
-    await pmap(
-      workers,
-      async (workerId) => {
+    return new Promise(async (resolve) => {
+      const fetch = async (): Promise<void> => {
+        const data = await iterator.next();
+        if (data.done) return;
 
-        while (true) {
-          pendingScan = pendingScan.then(() =>
-            this.scan(scanCursor)
-              .then((result) => {
-                scanCursor = result.cursor;
-                return result;
-              })
-          );
-
-          const { cursor, items } = await pendingScan;
-
-          if (depleted) break;
-
-          const parsedItems: KVS<T> = items.reduce((acc, [key, strVal]) => {
-            return {
-              ...acc,
-              [key]: this.mapKeysGet(JSON.parse(strVal)),
-            };
-          }, {} as KVS<T>);
-
-          if (cursor === '0') depleted = true;
-          scanCursor = cursor;
-
-          await func(parsedItems, workerId);
+        for (const item of data.value as KeyValue<T>[]) {
+          q.push({item, func}, (e, id) => {
+            processed++;
+            if (process.env.NODE_ENV === 'test') ids.push(id);
+            if (processed === len) return resolve(ids);
+          });
         }
-      },
-      {concurrency: numWorkers}
-    );
+      };
+
+      chunkSize = (numWorkers * 4).toString();
+      const q = fastq(this.worker, Math.ceil(numWorkers / warmupFactor));
+      q.empty = fetch;
+      q.drain = fetch;
+
+      const warmup = setInterval(() => {
+        if (warmupFactor > 1) {
+          warmupFactor--;
+          q.concurrency = Math.ceil(numWorkers / warmupFactor);
+        } else {
+          clearInterval(warmup);
+        }
+      }, 2000);
+
+      await fetch();
+    });
   }
 
-  public scan(scanCursor: string): Promise<ScanResult> {
-    return new Promise<ScanResult>((resolve, reject) => {
-      this.redisClient.hscan(this.dbName, scanCursor, (err, [cursor, data]) => {
-        if (err) return reject(err);
-        const items = Array.from(data, (x, k) => k % 2 ? undefined : [x, data[k + 1]]).filter((x) => x);
-        resolve({cursor, items});
-      });
-    });
+  private worker = async ({item, func}: { item: KeyValue<T>, func: (key: string, value: T) => Promise<any> }, cb: any): Promise<void> => {
+    const [id, entity] = item;
+    try {
+      await func(id, entity);
+      cb(null, process.env.NODE_ENV === 'test' ? id : undefined);
+    } catch (e) {
+      console.error(e);
+      cb(e)
+    }
+  };
+
+  public async * scanAsync(): AsyncGenerator<KeyValue<T>[], void, unknown> {
+    let cursor = '0';
+    do {
+      const data = await this.hscanAsync(this.dbName, cursor, 'COUNT', chunkSize);
+      cursor = data[0];
+
+      // deserialize the data to KeyValue<T>
+      const items: KeyValue<T>[] = [];
+      for (let i = 0; i < data[1].length; i += 2) {
+        items.push([data[1][i], this.mapKeysGet(JSON.parse(data[1][i + 1]))])
+      }
+      if (items.length > 0) yield items;
+
+    } while (cursor !== '0')
   }
 
   public flush() {
@@ -255,5 +277,18 @@ export class RedisKvs<T> {
         }, {});
     }
     return mappedVal;
+  }
+
+  private normalizeMany(val: KVS<any>): KVS<string> {
+    return Object.entries(val)
+      .reduce((acc: KVS<string>, [key, val]) => {
+        const newVal = this.mapKeysSet(val);
+        acc[key] = RedisKvs.normalize(newVal);
+        return acc;
+      }, {});
+  }
+
+  private static normalize(val: any): string {
+    return typeof val !== 'string' ? JSON.stringify(val) : val as string;
   }
 }
