@@ -6,6 +6,7 @@ import { Dump } from '../Dump';
 import MediaWiki from '../MediaWiki';
 import DU from '../DOMUtils';
 import logger from '../Logger';
+import path from 'path';
 
 export async function removeOrEncodeLink(mw: MediaWiki, dump: Dump, linkNode: DominoElement, href: string) {
     const title = mw.extractPageTitleFromHref(href);
@@ -174,10 +175,11 @@ export async function rewriteUrl(articleId: string, mw: MediaWiki, dump: Dump, l
 
         if (articleId.includes('/')) {
             const href = linkNode.getAttribute('href'); // href is modified above, so this is necessary
-            const resourceNamespace = 'A';
-            const slashesInUrl = articleId.split('/').length - 1;
-            const upStr = '../'.repeat(slashesInUrl + 1);
-            linkNode.setAttribute('href', `${upStr}${resourceNamespace}/${href}`);
+
+            /* In case articleId starts with / then browser considers
+            everything afterward as one path element and '../' will
+            come back at the root of the articleId */
+            linkNode.setAttribute('href', articleId.startsWith('/') ? '../../' + href : path.relative(articleId, href));
         }
     }
     return { mediaDependencies };
